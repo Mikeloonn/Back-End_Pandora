@@ -1,0 +1,89 @@
+package com.example.tiendaPandora.security.jwt;
+
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.time.temporal.TemporalUnit;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.function.Function;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.stereotype.Service;
+
+import com.example.tiendaPandora.entities.Usuario;
+
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.io.Decoders;
+import io.jsonwebtoken.security.Keys;
+
+import javax.crypto.SecretKey;
+
+
+@Service
+public class JwtService {
+
+    @Value("${jwt.secret}")
+    private String secretKey;
+
+    public String generateToken(Map<String, Object> extraClaims, UserDetails userDetails, String jti, long number, TemporalUnit temporalUnit) {
+        Instant now = Instant.now();
+
+        Date issuedAt = Date.from(now);
+        Date expiration = Date.from(now.plus(number, temporalUnit));
+
+        return Jwts.builder()
+                .claims(extraClaims)
+                .id(jti)
+                .subject(userDetails.getUsername())
+                .issuedAt(issuedAt)
+                .expiration(expiration)
+                .signWith(getSignInKey())
+                .compact();
+    }
+
+    private SecretKey getSignInKey() {
+        byte[] keyBytes = Decoders.BASE64.decode(secretKey);
+        return Keys.hmacShaKeyFor(keyBytes);
+    }
+
+    public String extractUsername(String token) {
+        return extractClaim(token, Claims::getSubject);
+    }
+
+    public String extractJti(String token) {
+        return extractClaim(token, Claims::getId);
+    }
+
+    private <T> T extractClaim(String token, Function<Claims, T> claimsResolver) {
+        Claims claims = extractAllClaims(token);
+        return claimsResolver.apply(claims);
+    }
+
+    public boolean isTokenValid(String token, UserDetails userDetails) {
+        String username = extractUsername(token);
+        return (username.equals(userDetails.getUsername())) && !isTokenExpired(token);
+    }
+
+    public boolean isTokenExpired(String token) {
+        return extractExpiration(token)
+                .toInstant()
+                .isBefore(Instant.now());
+    }
+
+    public Date extractExpiration(String token) {
+        return extractClaim(token, Claims::getExpiration);
+    }
+
+    private Claims extractAllClaims(String token) {
+        return Jwts.parser()
+                .verifyWith(getSignInKey())
+                .build()
+                .parseSignedClaims(token)
+                .getPayload();
+    }
+
+}
