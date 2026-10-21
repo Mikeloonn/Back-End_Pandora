@@ -1,0 +1,198 @@
+package com.example.tiendaPandora.services;
+
+import com.example.tiendaPandora.dtos.request.RequestVarianteProducto;
+import com.example.tiendaPandora.dtos.response.ResponseVarianteProducto;
+import com.example.tiendaPandora.entities.*;
+import com.example.tiendaPandora.exceptions.EntidadNoEncontradaException;
+import com.example.tiendaPandora.exceptions.ReglaDeNegocioException;
+import com.example.tiendaPandora.mappers.MapperVarianteProducto;
+import com.example.tiendaPandora.repositories.VarianteAtributoRepository;
+import com.example.tiendaPandora.repositories.VarianteProductoRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.*;
+
+@Service
+@RequiredArgsConstructor
+public class VarianteProductoService {
+
+    private final VarianteProductoRepository varianteProductoRepository;
+    private final VarianteAtributoRepository varianteAtributoRepository;
+
+    private final ProductoService productoService;
+    private final ValorAtributoService valorAtributoService;
+
+    public List<ResponseVarianteProducto> listar(){
+        return varianteProductoRepository.findAll().stream()
+                .map(MapperVarianteProducto::toResponse)
+                .toList();
+    }
+
+    public VarianteProducto buscarVarianteProducto(UUID idVarianteProducto){
+        return varianteProductoRepository.findById(idVarianteProducto)
+                .orElseThrow(() -> new EntidadNoEncontradaException(("Variante producto no encontrado")));
+    }
+
+    public ResponseVarianteProducto buscarPorIdVarianteProducto(UUID idVarianteProducto){
+
+        VarianteProducto varianteProducto = buscarVarianteProducto(idVarianteProducto);
+
+        return MapperVarianteProducto.toResponse(varianteProducto);
+    }
+
+    @Transactional
+    public ResponseVarianteProducto crear(RequestVarianteProducto requestVarianteProducto, UUID idProducto){
+
+        Producto producto = productoService.buscarProducto(idProducto);
+
+        validarVariantesDelProducto(producto, requestVarianteProducto);
+
+        cambiarPrincipal(requestVarianteProducto, producto, null);
+        VarianteProducto varianteProducto = MapperVarianteProducto.toEntity(requestVarianteProducto);
+
+        producto.addVariante(varianteProducto);
+
+        if(validarCombinacionExistente(idProducto, requestVarianteProducto)){
+            throw new ReglaDeNegocioException("Combinacion de atributos existente");
+        }
+
+        for(UUID idValorAtributo : requestVarianteProducto.getIdValorAtributos()){
+
+            ValorAtributo valorAtributo = valorAtributoService.buscarValorAtributo(idValorAtributo);
+
+            VarianteAtributo varianteAtributo = new  VarianteAtributo();
+
+            valorAtributo.addVarianteAtributo(varianteAtributo);
+            varianteProducto.addVarianteAtributo(varianteAtributo);
+        }
+
+        varianteProducto = varianteProductoRepository.save(varianteProducto);
+
+        return MapperVarianteProducto.toResponse(varianteProducto);
+    }
+
+    @Transactional
+    public String actualizar(RequestVarianteProducto requestVarianteProducto, UUID idProducto, UUID idVarianteProducto){
+
+        Producto producto = productoService.buscarProducto(idProducto);
+
+        validarVariantesDelProducto(producto, requestVarianteProducto);
+
+        VarianteProducto varianteProducto = buscarVarianteProducto(idVarianteProducto);
+        cambiarPrincipal(requestVarianteProducto, producto, varianteProducto);
+
+        varianteProducto.setStock(requestVarianteProducto.getStock());
+        varianteProducto.setEsPrincipal(requestVarianteProducto.getEsPrincipal());
+
+        if(!validarCombinacionExistente(idProducto, requestVarianteProducto)){
+            varianteProducto.getVariantesAtributos().clear();
+            varianteProductoRepository.flush();
+
+            for(UUID idValorAtributo : requestVarianteProducto.getIdValorAtributos()){
+                ValorAtributo valorAtributo = valorAtributoService.buscarValorAtributo(idValorAtributo);
+
+                VarianteAtributo varianteAtributo = new  VarianteAtributo();
+
+                valorAtributo.addVarianteAtributo(varianteAtributo);
+                varianteProducto.addVarianteAtributo(varianteAtributo);
+            }
+        }
+
+        varianteProductoRepository.save(varianteProducto);
+
+        return "Variante de producto actualizado correctamente";
+    }
+
+    public String eliminar(UUID idVarianteProducto){
+
+        VarianteProducto varianteProducto = buscarVarianteProducto(idVarianteProducto);
+
+        if(varianteProducto.getEsPrincipal()){
+            throw new ReglaDeNegocioException("No se puede eliminar la variante principal");
+        }
+
+        varianteProductoRepository.delete(varianteProducto);
+
+        return "Variante de producto eliminado correctamente";
+    }
+
+    private void validarVariantesDelProducto(Producto producto, RequestVarianteProducto requestVarianteProducto){
+
+        Set<UUID> idsValores = new HashSet<>(requestVarianteProducto.getIdValorAtributos());
+
+        if (idsValores.size() != requestVarianteProducto.getIdValorAtributos().size()) {
+            throw new ReglaDeNegocioException(
+                    "No se pueden repetir valores de atributo"
+            );
+        }
+
+        long cantidadAtributosDistintos = varianteAtributoRepository.contarAtributosDistintos(idsValores);
+
+        if (cantidadAtributosDistintos != idsValores.size()) {
+            throw new ReglaDeNegocioException(
+                    "No se pueden enviar dos valores del mismo atributo"
+            );
+        }
+
+        Set<UUID> atributosProducto = productoService.obtenerIdsAtributosDelProducto(producto.getIdProducto());
+
+        Set<UUID> atributosEnviados = valorAtributoService.obtenerIdsAtributosDeValores(idsValores);
+
+        if (!atributosProducto.equals(atributosEnviados)) {
+            throw new ReglaDeNegocioException(
+                    "Los atributos de la variante no coinciden con los atributos del producto"
+            );
+        }
+
+    }
+
+    private boolean validarCombinacionExistente(UUID idProducto, RequestVarianteProducto requestVarianteProducto){
+        Set<UUID> idsValores = requestVarianteProducto.getIdValorAtributos();
+        return varianteAtributoRepository.existeCombinacion(idProducto,
+                idsValores,
+                idsValores.size());
+    }
+
+    private void cambiarPrincipal(RequestVarianteProducto request, Producto producto, VarianteProducto varianteProducto){
+
+        List<VarianteProducto> variantes = producto.getVariantes();
+
+        if(variantes.isEmpty()){
+            request.setEsPrincipal(true);
+            return;
+        }
+
+        if(varianteProducto != null){
+            if (variantes.size() == 1 && !request.getEsPrincipal()) {
+                throw new ReglaDeNegocioException(
+                        "No se puede quitar el principal porque es la única variante del producto"
+                );
+            }
+            if (request.getEsPrincipal()) {
+                desmarcarPrincipal(producto, varianteProducto);
+            }
+            return;
+        }
+
+        if (request.getEsPrincipal()) {
+            desmarcarPrincipal(producto, null);
+        }
+    }
+
+    private void desmarcarPrincipal(Producto producto, VarianteProducto varianteExcluir) {
+
+        Optional<VarianteProducto> variantePrincipal = varianteProductoRepository.findByEsPrincipalAndProducto(true, producto);
+
+        if (variantePrincipal.isPresent()) {
+
+            VarianteProducto principal = variantePrincipal.get();
+
+            if (varianteExcluir == null || !principal.getIdVarianteProducto().equals(varianteExcluir.getIdVarianteProducto())) {
+                principal.setEsPrincipal(false);
+            }
+        }
+    }
+
+}
